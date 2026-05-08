@@ -89,8 +89,9 @@ For each repo in the task, forest runs (roughly):
 
 ```
 git -C <root>/<repo> worktree add \
+    -b task/<task> \
     <root>/.forest/worktrees/<task>/<repo> \
-    -b task/<task> <base-branch>
+    <base-branch>
 ```
 
 If `task/<task>` already exists in that repo, it checks out the existing

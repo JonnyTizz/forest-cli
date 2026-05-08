@@ -35,6 +35,10 @@ Behaviour:
 1. Refuses if `.forest/` already exists, unless `--force`.
 2. Scans immediate subdirectories for `.git/`. With at least one TTY and no
    `--no-prompt` / `--repos`, asks which to track via a Huh multi-select.
+   In non-interactive contexts (CI, agent shells), pass either `--no-prompt`
+   (accepts all detected repos) or `--repos a,b,c` — otherwise the command
+   fails with `--repos or --no-prompt is required in non-interactive mode`
+   rather than trying to draw a prompt to a pipe.
 3. Writes `.forest/config.yaml` with `default_base: main` for each chosen
    repo and the default agent / editor / worktrees-dir settings.
 4. Writes `.forest/agents/00-overview.md` with a placeholder template.
