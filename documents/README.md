@@ -9,7 +9,8 @@ A tour of the tool, ordered for first-time reading.
 | [`03-command-reference.md`](./03-command-reference.md) | Every command and every flag, with a pointer to the implementation file. |
 | [`04-code-tour.md`](./04-code-tour.md) | Package-by-package walk through the source code so you can confidently change it. |
 | [`05-bubble-tea-tui.md`](./05-bubble-tea-tui.md) | Bubble Tea / Lipgloss / Huh primer, grounded in forest's TUI. |
-| [`issues/security.md`](./issues/security.md) | Security review findings. |
+| [`issues/security.md`](./issues/security.md) | Abstract security review findings. |
+| [`issues/security-local.md`](./issues/security-local.md) | Reassessment of the security findings under the realistic "personal CLI on my laptop" threat model — what actually matters and what doesn't. |
 | [`issues/correctness.md`](./issues/correctness.md) | Correctness, UX, and code-quality findings (including one real bug). |
 
 Suggested reading paths:
@@ -17,4 +18,4 @@ Suggested reading paths:
 - **"I just want to use it"** → 01 → 02 → 03 (skim).
 - **"I want to understand the code I shipped"** → 01 → 02 → 04.
 - **"I want to extend the TUI"** → 04 → 05.
-- **"What's broken?"** → `issues/security.md` and `issues/correctness.md`.
+- **"What's broken?"** → `issues/correctness.md`, then `issues/security-local.md` (which contextualises the abstract `issues/security.md`).
