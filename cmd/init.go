@@ -67,6 +67,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	if !initNoPrompt && len(initRepos) == 0 {
+		if !isTTY() {
+			return errors.New("--repos or --no-prompt is required in non-interactive mode")
+		}
 		var picked []string
 		opts := make([]huh.Option[string], len(detected))
 		for i, r := range detected {
