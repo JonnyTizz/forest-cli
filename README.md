@@ -139,7 +139,7 @@ Exits 2 when problems are found. `--fix` removes orphan directories and prunes
 stale worktree entries from each repo.
 
 ### `forest tui`
-A read-only interactive task explorer (navigate with `j`/`k`, `r` reload,
+An interactive task dashboard (navigate with `j`/`k`, `r` reload,
 `s` env-sync, `d` remove-with-confirmation, `q` quit). Task creation and agent
 launching are CLI-only.
 
