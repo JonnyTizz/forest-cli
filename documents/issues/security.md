@@ -1,5 +1,11 @@
 # Security Audit: forest-cli
 
+> **Status (June 2026):** findings #1 and #2/#8 have since been fixed; #7
+> (option injection) is mitigated by `workspace.ValidateRef`. See
+> [`review-2026-06.md`](review-2026-06.md) for details. The notes below are the
+> original audit, corrected only for the config filename (it is
+> `.forest/config.yaml`, not `forest.yaml`) and the summary table numbering.
+
 ## CRITICAL
 
 ### 1. Shell Injection via `$EDITOR` — [cmd/config_edit.go:38](../../cmd/config_edit.go#L38)
@@ -23,7 +29,7 @@ func absUnder(root, p string) string {
 }
 ```
 
-A `forest.yaml` with `source: /etc/passwd` or `source: ../../.ssh/id_rsa` will read those files and copy them into your task directory. This matters if you ever open a project with a `forest.yaml` you didn't write yourself (cloned repos, shared templates). The fix requires rejecting absolute paths and calling `filepath.Clean` + a prefix check to ensure the result stays under `root`.
+A `.forest/config.yaml` with `source: /etc/passwd` or `source: ../../.ssh/id_rsa` will read those files and copy them into your task directory. This matters if you ever open a project with a `.forest/config.yaml` you didn't write yourself (cloned repos, shared templates). The fix requires rejecting absolute paths and calling `filepath.Clean` + a prefix check to ensure the result stays under `root`. **(Fixed: see `envfiles.containedUnder`.)**
 
 ---
 
@@ -35,7 +41,7 @@ Task names are validated by `nameRe` (lowercase, digits, `.`, `_`, `-` only) so 
 
 ### 4. Unvalidated `path` field in repo config — [internal/config/config.go](../../internal/config/config.go)
 
-The `Repo.Path` field (which points to local git repos) is not restricted to relative paths or paths within the project. A malicious `forest.yaml` with `path: /` or `path: ../../../../some-system-dir` would have git worktree operations (`git worktree add`, `git worktree remove --force`) run against arbitrary directories on your filesystem.
+The `Repo.Path` field (which points to local git repos) is not restricted to relative paths or paths within the project. A malicious `.forest/config.yaml` with `path: /` or `path: ../../../../some-system-dir` would have git worktree operations (`git worktree add`, `git worktree remove --force`) run against arbitrary directories on your filesystem. **(Left as-is by design — repos may legitimately live outside the project, and `git worktree remove` only removes registered worktrees; see `review-2026-06.md`.)**
 
 ---
 
@@ -48,9 +54,12 @@ The `Repo.Path` field (which points to local git repos) is not restricted to rel
 ### 6. World-readable config and metadata files — Multiple locations
 
 Files written with `0o644` (readable by all users on the system):
-- `.forest/forest.yaml` — contains repo paths and env file config
+- `.forest/config.yaml` — contains repo paths and env file config
 - `.forest-task.yaml` — task metadata
 - Generated `AGENTS.md`/`CLAUDE.md` in each task
+- **Synced env-file copies** (`envfiles.Sync` writes `0o644`) — this is the
+  concrete secret-leak case: a `.env` with API keys copied into a task workspace
+  becomes world-readable.
 
 On a shared or multi-user machine this leaks your project structure and agent configurations. If those env files contain secrets (API keys, `.env` files synced into tasks), they're exposed.
 
@@ -70,14 +79,23 @@ Same function is used for the destination path. A config with `dest: /tmp/exfil`
 
 ## Summary Table
 
-| # | Severity | Finding | File |
-|---|----------|---------|------|
-| 1 | Critical | Shell injection via `$EDITOR` in `sh -c` | [cmd/config_edit.go:38](../../cmd/config_edit.go#L38) |
-| 2 | Critical | Path traversal in env file sync (read/write arbitrary files) | [internal/envfiles/envfiles.go:117](../../internal/envfiles/envfiles.go#L117) |
-| 3 | High | Unvalidated `Repo.Path` allows git ops on arbitrary dirs | [internal/config/config.go](../../internal/config/config.go) |
-| 4 | Medium | TOCTOU on task dir creation | [internal/workspace/workspace.go:70](../../internal/workspace/workspace.go#L70) |
-| 5 | Medium | Metadata/config files world-readable (0o644) | Multiple |
-| 6 | Medium | Git args missing `--` option terminator | [internal/gitx/gitx.go](../../internal/gitx/gitx.go) |
-| 7 | Low | Absolute `Dest` paths in env file config not restricted | [internal/envfiles/envfiles.go](../../internal/envfiles/envfiles.go) |
+The numbering below matches the finding headings above (the body uses
+Critical/High/Medium/Low headings; finding #3 in the body — `os.RemoveAll` — was
+assessed as not exploitable and is omitted here).
 
-**The two issues that could actually hurt you:** #1 only fires if your `$EDITOR` env var gets poisoned before you run `forest config edit agents`. #2 is the more realistic risk — if you ever run forest against a repo you didn't fully trust, a malicious `forest.yaml` could exfiltrate files like `~/.ssh/id_rsa` or `~/.netrc` into the task workspace where another tool might upload them.
+| # | Severity | Finding | File | Status |
+|---|----------|---------|------|--------|
+| 1 | Critical | Shell injection via `$EDITOR` in `sh -c` | [cmd/config_edit.go](../../cmd/config_edit.go) | Fixed |
+| 2 | Critical | Path traversal in env file sync (read/write arbitrary files) | [internal/envfiles/envfiles.go](../../internal/envfiles/envfiles.go) | Fixed |
+| 4 | High | Unvalidated `Repo.Path` allows git ops on arbitrary dirs | [internal/config/config.go](../../internal/config/config.go) | By design |
+| 5 | Medium | TOCTOU on task dir creation | [internal/workspace/workspace.go](../../internal/workspace/workspace.go) | Open (low risk) |
+| 6 | Medium | Metadata/config files world-readable (0o644) | Multiple | Open |
+| 7 | Medium | Git args missing `--` option terminator | [internal/gitx/gitx.go](../../internal/gitx/gitx.go) | Mitigated (`ValidateRef`) |
+| 8 | Low | Absolute `Dest` paths in env file config not restricted | [internal/envfiles/envfiles.go](../../internal/envfiles/envfiles.go) | Fixed (with #2) |
+
+**The two issues that could actually hurt you:** #1 only fired if your `$EDITOR`
+env var got poisoned before you ran `forest config edit` (now fixed). #2 was the
+more realistic risk — if you ever run forest against a repo you didn't fully
+trust, a malicious `.forest/config.yaml` could exfiltrate files like
+`~/.ssh/id_rsa` or `~/.netrc` into the task workspace where another tool might
+upload them — and is now fixed by path containment.

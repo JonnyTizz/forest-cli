@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/JonnyTizz/forest/internal/config"
-	"github.com/JonnyTizz/forest/internal/workspace"
+	"github.com/JonnyTizz/forest/internal/gitx"
 )
 
 const overviewTemplate = `# Project overview
@@ -88,10 +88,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, name := range selected {
+		base := "main"
+		repoDir := filepath.Join(cwd, name)
+		if gitx.IsRepo(repoDir) {
+			base = gitx.DefaultBranch(repoDir)
+		}
 		cfg.Repos = append(cfg.Repos, config.Repo{
 			Name:        name,
 			Path:        name,
-			DefaultBase: "main",
+			DefaultBase: base,
 		})
 	}
 
@@ -109,15 +114,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 	if err := config.Save(filepath.Join(forestDir, config.ConfigFile), &cfg); err != nil {
 		return err
-	}
-
-	// Add worktree dir to each repo's .git/info/exclude.
-	rel := strings.TrimPrefix(cfg.WorktreesDir, "./")
-	for _, r := range cfg.Repos {
-		repoDir := filepath.Join(cwd, r.Path)
-		if _, err := os.Stat(filepath.Join(repoDir, ".git")); err == nil {
-			_ = workspace.IgnoreInExclude(repoDir, rel)
-		}
 	}
 
 	fmt.Printf("Initialised forest project at %s\n", forestDir)

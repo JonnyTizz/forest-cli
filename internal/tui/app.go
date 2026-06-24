@@ -23,12 +23,13 @@ func Run(p *project.Project) error {
 }
 
 type model struct {
-	p       *project.Project
-	tasks   []workspace.Task
-	cursor  int
-	width   int
-	height  int
-	message string // ephemeral status line
+	p          *project.Project
+	tasks      []workspace.Task
+	cursor     int
+	width      int
+	height     int
+	message    string // ephemeral status line
+	confirmDel bool   // awaiting y/n confirmation for a delete
 }
 
 func newModel(p *project.Project) *model {
@@ -57,6 +58,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	case tea.KeyMsg:
+		// When a delete is pending, the next keypress is the confirmation.
+		if m.confirmDel {
+			switch msg.String() {
+			case "y", "Y":
+				m.confirmDel = false
+				if t := m.current(); t != nil {
+					warnings, err := workspace.Remove(m.p, t.Meta.Name, false, false)
+					switch {
+					case err != nil:
+						m.message = "remove refused: " + err.Error()
+					case len(warnings) > 0:
+						m.message = fmt.Sprintf("Removed %s (with warnings: %s)", t.Meta.Name, strings.Join(warnings, "; "))
+						m.reload()
+					default:
+						m.message = "Removed " + t.Meta.Name
+						m.reload()
+					}
+				}
+			default:
+				m.confirmDel = false
+				m.message = "Delete cancelled"
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
@@ -82,12 +107,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "d":
 			if t := m.current(); t != nil {
-				if err := workspace.Remove(m.p, t.Meta.Name, false, false); err != nil {
-					m.message = "remove refused: " + err.Error()
-				} else {
-					m.message = "Removed " + t.Meta.Name
-					m.reload()
-				}
+				m.confirmDel = true
+				m.message = dirtyStyle.Render(fmt.Sprintf("Delete task %q and its branches? (y/N)", t.Meta.Name))
 			}
 		}
 	}
@@ -114,7 +135,7 @@ func (m *model) View() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 
 	header := titleStyle.Render(" forest ") + "  " + mutedStyle.Render(m.p.Root)
-	help := helpStyle.Render("j/k: move • r: reload • s: env sync • d: remove • q: quit")
+	help := helpStyle.Render("j/k: move • r: reload • s: env sync • d: remove (confirm) • q: quit")
 	status := m.message
 	if status == "" {
 		status = help

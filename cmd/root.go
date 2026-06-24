@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -27,8 +28,31 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "Verbose output")
 }
 
+// ExitCodeError carries a specific process exit code out of a command's RunE.
+// Commands return it when they need an exit status other than the default 1.
+type ExitCodeError struct {
+	Code int
+	Err  error
+}
+
+func (e *ExitCodeError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("exit status %d", e.Code)
+}
+
+func (e *ExitCodeError) Unwrap() error { return e.Err }
+
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		var ece *ExitCodeError
+		if errors.As(err, &ece) {
+			if ece.Err != nil {
+				fmt.Fprintln(os.Stderr, "error:", ece.Err)
+			}
+			os.Exit(ece.Code)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

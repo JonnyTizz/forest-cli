@@ -25,9 +25,21 @@ type Result struct {
 func Sync(projectRoot, taskDir string, files []config.EnvFile, force bool) ([]Result, error) {
 	results := make([]Result, 0, len(files))
 	for _, f := range files {
-		src := absUnder(projectRoot, f.Source)
-		dst := absUnder(taskDir, f.Dest)
+		src, srcErr := containedUnder(projectRoot, f.Source)
+		dst, dstErr := containedUnder(taskDir, f.Dest)
 		r := Result{Source: src, Dest: dst}
+		if srcErr != nil {
+			r.Source = f.Source
+			r.Err = fmt.Errorf("source: %w", srcErr)
+			results = append(results, r)
+			continue
+		}
+		if dstErr != nil {
+			r.Dest = f.Dest
+			r.Err = fmt.Errorf("dest: %w", dstErr)
+			results = append(results, r)
+			continue
+		}
 		srcBytes, err := os.ReadFile(src)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -79,8 +91,14 @@ type DriftEntry struct {
 func Diff(projectRoot, taskDir string, files []config.EnvFile) ([]DriftEntry, error) {
 	out := make([]DriftEntry, 0, len(files))
 	for _, f := range files {
-		src := absUnder(projectRoot, f.Source)
-		dst := absUnder(taskDir, f.Dest)
+		src, srcErr := containedUnder(projectRoot, f.Source)
+		dst, dstErr := containedUnder(taskDir, f.Dest)
+		if srcErr != nil {
+			return nil, fmt.Errorf("env_files source %q: %w", f.Source, srcErr)
+		}
+		if dstErr != nil {
+			return nil, fmt.Errorf("env_files dest %q: %w", f.Dest, dstErr)
+		}
 		e := DriftEntry{Source: src, Dest: dst}
 		sb, sErr := os.ReadFile(src)
 		db, dErr := os.ReadFile(dst)
@@ -114,11 +132,23 @@ func HasDrift(entries []DriftEntry) bool {
 	return false
 }
 
-func absUnder(root, p string) string {
-	if filepath.IsAbs(p) {
-		return p
+// containedUnder resolves p relative to root and guarantees the result stays
+// inside root. Absolute paths and paths that escape root via ".." are rejected,
+// so a config from an untrusted source cannot read or write arbitrary files
+// (e.g. source: /etc/passwd or ../../.ssh/id_rsa).
+func containedUnder(root, p string) (string, error) {
+	if p == "" {
+		return "", errors.New("empty path")
 	}
-	return filepath.Join(root, p)
+	if filepath.IsAbs(p) {
+		return "", fmt.Errorf("absolute paths are not allowed (%q)", p)
+	}
+	joined := filepath.Join(root, p)
+	cleanRoot := filepath.Clean(root)
+	if joined != cleanRoot && !strings.HasPrefix(joined, cleanRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path escapes its root (%q)", p)
+	}
+	return joined, nil
 }
 
 // unifiedLineDiff is a minimal, line-oriented diff that flags every changed

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -56,7 +55,8 @@ func runEnvDiff(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if anyDrift {
-		os.Exit(2)
+		// Exit 2 signals "drift found" to scripts, distinct from 1 (error).
+		return &ExitCodeError{Code: 2}
 	}
 	return nil
 }

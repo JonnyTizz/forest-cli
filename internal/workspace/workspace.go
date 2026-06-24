@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -58,6 +59,23 @@ func ValidateName(name string) error {
 	return nil
 }
 
+// ValidateRef rejects branch/base names that git could mistake for an option
+// or that are otherwise unsafe to pass on a git command line. It is deliberately
+// conservative rather than a full check of git's ref rules.
+func ValidateRef(ref string) error {
+	switch {
+	case ref == "":
+		return errors.New("empty branch/base name")
+	case strings.HasPrefix(ref, "-"):
+		return fmt.Errorf("invalid ref %q (must not start with '-')", ref)
+	case strings.ContainsAny(ref, " \t\n:?*[\\^~"):
+		return fmt.Errorf("invalid ref %q (contains whitespace or a git-special character)", ref)
+	case strings.Contains(ref, ".."):
+		return fmt.Errorf("invalid ref %q (contains '..')", ref)
+	}
+	return nil
+}
+
 // Create materialises a new task workspace.
 func Create(p *project.Project, opts CreateOptions) (*Task, error) {
 	if err := ValidateName(opts.Name); err != nil {
@@ -74,62 +92,83 @@ func Create(p *project.Project, opts CreateOptions) (*Task, error) {
 	if branch == "" {
 		branch = "task/" + opts.Name
 	}
+	if err := ValidateRef(branch); err != nil {
+		return nil, err
+	}
+	if opts.Base != "" {
+		if err := ValidateRef(opts.Base); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		return nil, err
 	}
 
 	meta := Meta{Name: opts.Name, CreatedAt: time.Now()}
-	created := make([]string, 0, len(opts.Repos)) // absolute worktree paths, for rollback
+	var created []createdWorktree // for rollback on any later failure
+
+	// fail rolls back everything created so far and removes the task dir.
+	fail := func(err error) (*Task, error) {
+		rollback(created)
+		os.RemoveAll(taskDir)
+		return nil, err
+	}
 
 	for _, repoName := range opts.Repos {
 		repoCfg, ok := p.Config.FindRepo(repoName)
 		if !ok {
-			rollback(p, created, branch)
-			os.RemoveAll(taskDir)
-			return nil, fmt.Errorf("repo %q not configured", repoName)
+			return fail(fmt.Errorf("repo %q not configured", repoName))
 		}
 		repoPath, err := p.RepoPath(repoName)
 		if err != nil {
-			rollback(p, created, branch)
-			os.RemoveAll(taskDir)
-			return nil, err
+			return fail(err)
 		}
 		base := opts.Base
 		if base == "" {
 			base = repoCfg.DefaultBase
 		}
 		wtPath := filepath.Join(taskDir, repoName)
-		newBranch := branch
-		if gitx.BranchExists(repoPath, branch) {
-			newBranch = "" // check out existing
+		branchExisted := gitx.BranchExists(repoPath, branch)
+		newBranch, checkout := branch, ""
+		if branchExisted {
+			newBranch, checkout = "", branch // check out the existing branch
 		}
-		if err := gitx.WorktreeAdd(repoPath, wtPath, newBranch, base); err != nil {
-			rollback(p, created, branch)
-			os.RemoveAll(taskDir)
-			return nil, fmt.Errorf("create worktree for %s: %w", repoName, err)
+		if err := gitx.WorktreeAdd(repoPath, wtPath, newBranch, checkout, base); err != nil {
+			return fail(fmt.Errorf("create worktree for %s: %w", repoName, err))
 		}
-		created = append(created, wtPath)
+		created = append(created, createdWorktree{
+			repoPath:     repoPath,
+			path:         wtPath,
+			branch:       branch,
+			branchByThis: !branchExisted,
+		})
 		meta.Repos = append(meta.Repos, RepoMeta{Name: repoName, Branch: branch, Base: base})
 	}
 
 	if err := writeMeta(taskDir, meta); err != nil {
-		return nil, err
+		return fail(fmt.Errorf("write task meta: %w", err))
 	}
 	if err := RegenerateAgents(p, &meta, taskDir); err != nil {
-		return nil, fmt.Errorf("write agents files: %w", err)
+		return fail(fmt.Errorf("write agents files: %w", err))
 	}
 	if _, err := envfiles.Sync(p.Root, taskDir, p.Config.EnvFiles, false); err != nil {
-		return nil, fmt.Errorf("sync env files: %w", err)
+		return fail(fmt.Errorf("sync env files: %w", err))
 	}
 	return &Task{Meta: meta, Dir: taskDir}, nil
 }
 
-// Remove tears down a task workspace.
-func Remove(p *project.Project, name string, force, keepBranches bool) error {
+// Remove tears down a task workspace. It returns any non-fatal warnings
+// (failed branch deletes, etc.) so callers can surface them however they like
+// instead of writing to stderr directly.
+//
+// Without force, a worktree that git refuses to remove (e.g. because it is
+// dirty) aborts the teardown before the task directory is deleted, so the task
+// is never left half-removed with stale git worktree metadata.
+func Remove(p *project.Project, name string, force, keepBranches bool) (warnings []string, err error) {
 	t, err := Get(p, name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Safety pass: refuse if any worktree dirty / has unpushed.
@@ -137,32 +176,51 @@ func Remove(p *project.Project, name string, force, keepBranches bool) error {
 		for _, r := range t.Meta.Repos {
 			wt := filepath.Join(t.Dir, r.Name)
 			if err := safety.EnsureClean(wt); err != nil {
-				return err
+				return nil, err
 			}
 			if err := safety.EnsureNoUnpushed(wt); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 
+	var removeFailed bool
 	for _, r := range t.Meta.Repos {
 		repoPath, err := p.RepoPath(r.Name)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warn: %v\n", err)
+			warnings = append(warnings, fmt.Sprintf("%v", err))
+			removeFailed = true
 			continue
 		}
 		wt := filepath.Join(t.Dir, r.Name)
 		if err := gitx.WorktreeRemove(repoPath, wt, force); err != nil {
-			fmt.Fprintf(os.Stderr, "warn: remove worktree %s: %v\n", wt, err)
+			warnings = append(warnings, fmt.Sprintf("remove worktree %s: %v", wt, err))
+			removeFailed = true
 		}
 		if !keepBranches {
 			if err := gitx.BranchDelete(repoPath, r.Branch, force); err != nil {
-				fmt.Fprintf(os.Stderr, "warn: delete branch %s in %s: %v\n", r.Branch, r.Name, err)
+				warnings = append(warnings, fmt.Sprintf("delete branch %s in %s: %v", r.Branch, r.Name, err))
 			}
 		}
 		_ = gitx.WorktreePrune(repoPath)
 	}
-	return os.RemoveAll(t.Dir)
+
+	// If a worktree could not be removed and we are not forcing, leave the task
+	// directory in place rather than orphaning git's worktree admin entries.
+	if removeFailed && !force {
+		return warnings, fmt.Errorf("task %q not fully removed; rerun with --force to override", name)
+	}
+	if err := os.RemoveAll(t.Dir); err != nil {
+		return warnings, err
+	}
+	// Prune now that the worktree directories are gone, clearing any admin
+	// entries git still held.
+	for _, r := range t.Meta.Repos {
+		if repoPath, err := p.RepoPath(r.Name); err == nil {
+			_ = gitx.WorktreePrune(repoPath)
+		}
+	}
+	return warnings, nil
 }
 
 // Get loads one task by name.
@@ -202,6 +260,32 @@ func List(p *project.Project) ([]Task, error) {
 		out = append(out, Task{Meta: *m, Dir: dir})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Meta.Name < out[j].Meta.Name })
+	return out, nil
+}
+
+// Orphans returns absolute paths of directories under the worktrees dir that do
+// not contain a readable task meta file. These are typically left behind by a
+// task creation that failed partway through.
+func Orphans(p *project.Project) ([]string, error) {
+	root := p.WorktreesDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		if _, err := readMeta(dir); err != nil {
+			out = append(out, dir)
+		}
+	}
+	sort.Strings(out)
 	return out, nil
 }
 
@@ -256,22 +340,24 @@ func readMeta(dir string) (*Meta, error) {
 	return &m, nil
 }
 
-// rollback removes any worktrees that were created before a failure mid-Create.
-func rollback(p *project.Project, worktreePaths []string, branch string) {
-	for _, wt := range worktreePaths {
-		// Find owning repo by checking which configured repo path is parent.
-		for _, r := range p.Config.Repos {
-			rp, err := p.RepoPath(r.Name)
-			if err != nil {
-				continue
-			}
-			if filepath.Base(wt) == r.Name {
-				_ = gitx.WorktreeRemove(rp, wt, true)
-				_ = gitx.BranchDelete(rp, branch, true)
-				_ = gitx.WorktreePrune(rp)
-				break
-			}
+// createdWorktree records a worktree made during Create, for rollback.
+type createdWorktree struct {
+	repoPath     string // absolute path to the owning repo
+	path         string // absolute path to the worktree
+	branch       string // task branch name
+	branchByThis bool   // true if Create created the branch (safe to delete)
+}
+
+// rollback removes worktrees created before a failure mid-Create. It only
+// deletes branches that Create itself created — a pre-existing branch that was
+// merely checked out is left untouched.
+func rollback(created []createdWorktree) {
+	for _, c := range created {
+		_ = gitx.WorktreeRemove(c.repoPath, c.path, true)
+		if c.branchByThis {
+			_ = gitx.BranchDelete(c.repoPath, c.branch, true)
 		}
+		_ = gitx.WorktreePrune(c.repoPath)
 	}
 }
 
@@ -287,50 +373,6 @@ func SuggestRepoOrder(p *project.Project) []string {
 		if st, err := os.Stat(rp); err == nil && st.IsDir() {
 			out = append(out, r.Name)
 		}
-	}
-	return out
-}
-
-// IgnoreInExclude appends a path to <repo>/.git/info/exclude (idempotent).
-func IgnoreInExclude(repoDir, line string) error {
-	excl := filepath.Join(repoDir, ".git", "info", "exclude")
-	b, err := os.ReadFile(excl)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	for _, ln := range splitLines(string(b)) {
-		if ln == line {
-			return nil
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(excl), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(excl, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if len(b) > 0 && b[len(b)-1] != '\n' {
-		f.WriteString("\n")
-	}
-	_, err = fmt.Fprintln(f, line)
-	return err
-}
-
-func splitLines(s string) []string {
-	var out []string
-	cur := ""
-	for _, r := range s {
-		if r == '\n' {
-			out = append(out, cur)
-			cur = ""
-			continue
-		}
-		cur += string(r)
-	}
-	if cur != "" {
-		out = append(out, cur)
 	}
 	return out
 }

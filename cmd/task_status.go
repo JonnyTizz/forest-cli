@@ -64,12 +64,15 @@ func runTaskStatus(cmd *cobra.Command, args []string) error {
 	return tw.Flush()
 }
 
+// truncate shortens s to at most n runes, appending an ellipsis when cut. It
+// counts and slices by rune so multi-byte characters are never split.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
 	if n <= 1 {
-		return s[:n]
+		return string(r[:n])
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }

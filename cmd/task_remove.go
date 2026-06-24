@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -29,7 +30,11 @@ func runTaskRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := workspace.Remove(p, args[0], flagForce, trKeepBranches); err != nil {
+	warnings, err := workspace.Remove(p, args[0], flagForce, trKeepBranches)
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "warn: %s\n", w)
+	}
+	if err != nil {
 		return err
 	}
 	fmt.Printf("Removed task %q\n", args[0])
